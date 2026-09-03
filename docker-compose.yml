@@ -1,0 +1,15 @@
+services:
+  protean-api:
+    build: .
+    container_name: protean-api
+    environment:
+      PORT: 9200
+    # Reachable only through the gateway. See the note in the Dockerfile for why
+    # publishing this port would break the trust model rather than just widen it.
+    expose:
+      - "9200"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9200/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

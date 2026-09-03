@@ -1,0 +1,13 @@
+{
+  "name": "protean-api-platform",
+  "version": "1.0.0",
+  "description": "Protean identity and trust APIs — Aadhaar eKYC, PAN verification, eSign and DigiLocker",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

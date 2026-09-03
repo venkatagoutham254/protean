@@ -10,6 +10,8 @@
  * routed, with no billing code to write and none to forget.
  */
 const express = require('express');
+const path = require('path');
+const swaggerUiDist = require('swagger-ui-dist');
 const { identity, requirePartner } = require('./middleware/identity');
 const { requestId, fail } = require('./middleware/request');
 
@@ -18,6 +20,67 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
 app.use(requestId);
 app.use(identity);
+
+/*
+ * Developer documentation.
+ *
+ * Served from the API itself rather than a separate docs site so the reference
+ * cannot drift from the deployment: the spec a partner reads is the one shipped
+ * beside the code that answers them.
+ *
+ * Outside partner authentication on purpose — a partner has to read the
+ * documentation to work out how to authenticate, so putting it behind
+ * authentication is a loop with no entrance.
+ */
+app.get('/openapi.yaml', (_req, res) => {
+  res.type('text/yaml').sendFile(path.join(__dirname, 'openapi.yaml'));
+});
+
+app.get('/docs', (_req, res) => {
+  res.type('html').send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protean API reference</title>
+<link rel="stylesheet" href="/docs/assets/swagger-ui.css">
+<style>
+  body{margin:0}
+  .topbar{display:none}
+  .swagger-ui .info{margin:28px 0}
+  .swagger-ui .info .title{font-size:34px}
+  .swagger-ui .scheme-container{box-shadow:none;border-bottom:1px solid #e3e7ec;background:#fafbfc}
+</style>
+</head>
+<body>
+<div id="ui"></div>
+<script src="/docs/assets/swagger-ui-bundle.js"></script>
+<script src="/docs/assets/swagger-ui-standalone-preset.js"></script>
+<script>
+window.ui = SwaggerUIBundle({
+  url: '/openapi.yaml',
+  dom_id: '#ui',
+  presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+  layout: 'StandaloneLayout',
+  docExpansion: 'list',
+  defaultModelsExpandDepth: 0,
+  tryItOutEnabled: true,
+  persistAuthorization: true,
+  requestInterceptor: (req) => {
+    // Try-it-out against the service directly needs the identity the gateway
+    // would normally supply, otherwise every call comes back 401 and reads as a
+    // broken example rather than a missing header.
+    req.headers['X-Customer-Id'] = req.headers['X-Customer-Id'] || 'partner-sandbox';
+    req.headers['X-Tenant-Id']   = req.headers['X-Tenant-Id']   || 'protean';
+    req.headers['X-Key-Id']      = req.headers['X-Key-Id']      || 'sandbox-key';
+    return req;
+  },
+});
+</script>
+</body>
+</html>`);
+});
+
+app.use('/docs/assets', express.static(swaggerUiDist.getAbsoluteFSPath()));
 
 // Liveness and readiness sit outside partner auth and outside metering — an
 // operator's health probe is not a partner's billable call.
@@ -34,7 +97,7 @@ app.get('/', (req, res) => {
       { name: 'Aadhaar eSign', basePath: '/esign/v1' },
       { name: 'DigiLocker', basePath: '/digilocker/v1' },
     ],
-    documentation: 'https://developer.protean.example/docs',
+    documentation: '/docs',
   });
 });
 

@@ -1,0 +1,550 @@
+openapi: 3.0.3
+info:
+  title: Protean identity and trust APIs
+  version: "1.0.0"
+  description: |
+    Aadhaar eKYC, PAN verification, Aadhaar eSign and DigiLocker.
+
+    ## Authentication
+
+    You do not send credentials to these endpoints. Call them through the
+    Protean gateway with your access token; the gateway verifies it and
+    forwards your verified identity. A request that reaches the service with no
+    resolvable partner is refused with `401`.
+
+    ## Consent
+
+    Every operation that reads or acts on a resident's data requires explicit
+    consent, recorded per action. Consent for one action does not carry to
+    another — a resident agreeing to share a PAN card has not agreed to share a
+    driving licence.
+
+    ## What is never returned
+
+    Full Aadhaar numbers. Every response masks to `XXXX XXXX 1234`. You cannot
+    store what you are never given.
+
+    ## Sandbox identities
+
+    | Aadhaar | Name | PAN | Use it to test |
+    |---|---|---|---|
+    | `999000100009` | Ananya Krishnan | `AKRPK4417J` | the clean path, three documents |
+    | `999000200000` | R. Venkatesh | `AVNPV9021C` | initials in the name, fewer documents |
+    | `999000300003` | Meera Sanjay Deshpande | `BMDPD3388K` | a PAN not seeded with Aadhaar |
+    | `999000400002` | Imran Qureshi | `CIQPQ7712M` | a resident who locked authentication |
+    | `999000900005` | — | — | a valid number that is not enrolled |
+    | — | — | `DXXPS1102L` | a surrendered PAN |
+
+    The sandbox OTP is always `123456`. Production sends a random OTP to the
+    registered mobile and never returns it in the response.
+  contact:
+    name: Protean partner support
+    url: https://developer.protean.example/support
+
+servers:
+  - url: http://localhost:8000
+    description: Through the Protean gateway (authenticated and metered)
+  - url: http://localhost:9200
+    description: Direct to the service (identity headers must be supplied by hand)
+
+tags:
+  - name: Aadhaar eKYC
+    description: Verify a resident against the Aadhaar record.
+  - name: PAN Verification
+    description: Confirm a PAN is active and linked.
+  - name: Aadhaar eSign
+    description: Sign a document with an Aadhaar-backed signature.
+  - name: DigiLocker
+    description: List and retrieve a resident's issued documents.
+  - name: Platform
+    description: Service metadata and health.
+
+paths:
+  /ekyc/v1/otp:
+    post:
+      tags: [Aadhaar eKYC]
+      summary: Send an OTP to the resident
+      description: |
+        Sends a one-time password to the mobile registered against the Aadhaar
+        number. Returns a `txnId` to pass to `/ekyc/v1/verify`.
+
+        More than one authentication can be in flight for the same resident, so
+        retrying on a slow network does not invalidate the attempt your customer
+        is already reading off their phone.
+      operationId: sendEkycOtp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aadhaar, consent]
+              properties:
+                aadhaar:
+                  type: string
+                  pattern: '^\d{12}$'
+                  example: "999000100009"
+                consent:
+                  type: string
+                  enum: ["Y"]
+                  description: Must be `Y`. Authentication without recorded consent is not permitted.
+                  example: "Y"
+      responses:
+        "202":
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string, example: "OTP-20260903-A1B2C3D4E5F6" }
+                  status: { type: string, example: "OTP_SENT" }
+                  maskedMobile: { type: string, example: "XXXXXX4417" }
+                  validForSeconds: { type: integer, example: 600 }
+                  attemptsAllowed: { type: integer, example: 3 }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "401": { $ref: '#/components/responses/Unauthenticated' }
+        "403":
+          description: The resident has locked Aadhaar authentication
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              example:
+                errorCode: PTN-403-002
+                message: The resident has locked Aadhaar authentication on this number.
+                resolution: The resident can unlock authentication on the UIDAI portal, or you can use an offline KYC method.
+        "404": { $ref: '#/components/responses/NotEnrolled' }
+
+  /ekyc/v1/verify:
+    post:
+      tags: [Aadhaar eKYC]
+      summary: Exchange an OTP for the resident's record
+      description: |
+        Returns the demographic record held against the Aadhaar number.
+
+        Three incorrect attempts close the transaction — start a new one rather
+        than retrying a closed `txnId`.
+      operationId: verifyEkycOtp
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txnId, otp]
+              properties:
+                txnId: { type: string, example: "OTP-20260903-A1B2C3D4E5F6" }
+                otp: { type: string, example: "123456" }
+      responses:
+        "200":
+          description: Identity verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  status: { type: string, example: VERIFIED }
+                  verifiedAt: { type: string, format: date-time }
+                  kyc: { $ref: '#/components/schemas/KycRecord' }
+        "401":
+          description: Incorrect OTP. `attemptsRemaining` says how many are left.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        "404": { $ref: '#/components/responses/UnknownTxn' }
+        "410":
+          description: The OTP expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        "429":
+          description: Too many incorrect attempts. The transaction is closed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /ekyc/v1/demographic:
+    post:
+      tags: [Aadhaar eKYC]
+      summary: Match supplied details against the record
+      description: |
+        Answers yes or no per field. The stored values are never echoed back, so
+        this cannot be used to read a record you do not already hold.
+      operationId: matchDemographics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aadhaar, consent]
+              properties:
+                aadhaar: { type: string, example: "999000100009" }
+                name: { type: string, example: "Ananya Krishnan" }
+                dateOfBirth: { type: string, format: date, example: "1991-04-17" }
+                gender: { type: string, enum: [M, F, T], example: "F" }
+                consent: { type: string, enum: ["Y"], example: "Y" }
+      responses:
+        "200":
+          description: Match result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  status: { type: string, enum: [MATCH, MISMATCH] }
+                  aadhaarMasked: { type: string, example: "XXXX XXXX 0009" }
+                  matches:
+                    type: object
+                    properties:
+                      name: { type: boolean }
+                      dateOfBirth: { type: boolean }
+                      gender: { type: boolean }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "404": { $ref: '#/components/responses/NotEnrolled' }
+
+  /pan/v1/verify:
+    post:
+      tags: [PAN Verification]
+      summary: Verify a PAN
+      description: |
+        A surrendered or inactive PAN resolves with its status rather than a
+        `404` — you need to tell "we could not find this" from "this exists and
+        cannot be used", because only the second is a decision you can explain
+        to your applicant.
+      operationId: verifyPan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pan]
+              properties:
+                pan: { type: string, example: "AKRPK4417J" }
+      responses:
+        "200":
+          description: PAN found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  pan: { type: string, example: "AKRPK4417J" }
+                  status: { type: string, enum: [VALID, SURRENDERED, INACTIVE] }
+                  registeredName: { type: string, example: "Ananya Krishnan" }
+                  holderType: { type: string, example: "Individual" }
+                  aadhaarSeeded: { type: boolean }
+                  lastUpdated: { type: string, format: date }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "404":
+          description: No PAN record
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /pan/v1/link-status:
+    post:
+      tags: [PAN Verification]
+      summary: Check PAN–Aadhaar seeding
+      description: |
+        `reason` distinguishes "never seeded" from "seeded against a different
+        PAN". The first sends your applicant to the tax portal; the second means
+        they gave you the wrong PAN.
+      operationId: panLinkStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pan, aadhaar]
+              properties:
+                pan: { type: string, example: "AKRPK4417J" }
+                aadhaar: { type: string, example: "999000100009" }
+      responses:
+        "200":
+          description: Link status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  pan: { type: string }
+                  linked: { type: boolean }
+                  reason: { type: string, example: "PAN and Aadhaar are seeded against each other." }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "404":
+          description: PAN or Aadhaar not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /esign/v1/initiate:
+    post:
+      tags: [Aadhaar eSign]
+      summary: Open a signature ceremony
+      description: |
+        Send only the SHA-256 of the document. The document itself never crosses
+        the wire, so it cannot be retained here, subpoenaed from here, or leaked
+        from here.
+      operationId: initiateEsign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aadhaar, documentHash, signerConsent]
+              properties:
+                aadhaar: { type: string, example: "999000100009" }
+                documentHash:
+                  type: string
+                  pattern: '^[a-f0-9]{64}$'
+                  example: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                documentName: { type: string, example: "loan-agreement.pdf" }
+                signerConsent: { type: string, enum: ["Y"], example: "Y" }
+      responses:
+        "202":
+          description: Ceremony open, OTP sent to the signer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string, example: "ESN-20260903-9A8B7C6D5E4F" }
+                  status: { type: string, example: AWAITING_SIGNER }
+                  signerMobileMasked: { type: string, example: "XXXXXX4417" }
+                  validForSeconds: { type: integer, example: 900 }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "403":
+          description: The signer has locked Aadhaar authentication
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        "404": { $ref: '#/components/responses/NotEnrolled' }
+
+  /esign/v1/complete:
+    post:
+      tags: [Aadhaar eSign]
+      summary: Authenticate the signer and return the signature
+      operationId: completeEsign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txnId, otp]
+              properties:
+                txnId: { type: string, example: "ESN-20260903-9A8B7C6D5E4F" }
+                otp: { type: string, example: "123456" }
+      responses:
+        "200":
+          description: Signed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  status: { type: string, example: SIGNED }
+                  signedAt: { type: string, format: date-time }
+                  documentHash: { type: string }
+                  signature: { type: string }
+                  signatureAlgorithm: { type: string, example: SHA256withRSA }
+                  signer:
+                    type: object
+                    properties:
+                      name: { type: string }
+                      aadhaarMasked: { type: string }
+                  certificate:
+                    type: object
+                    description: Issued for this ceremony and expiring with it.
+                    properties:
+                      subject: { type: string }
+                      issuer: { type: string }
+                      validFrom: { type: string, format: date-time }
+                      validTo: { type: string, format: date-time }
+                      serialNumber: { type: string }
+        "401":
+          description: Incorrect OTP
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        "404": { $ref: '#/components/responses/UnknownTxn' }
+        "410":
+          description: The ceremony expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /digilocker/v1/documents:
+    get:
+      tags: [DigiLocker]
+      summary: List a resident's issued documents
+      description: Metadata only. Listing is free; fetching is the billable act.
+      operationId: listDocuments
+      parameters:
+        - name: aadhaar
+          in: query
+          required: true
+          schema: { type: string }
+          example: "999000100009"
+      responses:
+        "200":
+          description: Documents available
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  aadhaarMasked: { type: string }
+                  holderName: { type: string }
+                  documentCount: { type: integer }
+                  documents:
+                    type: array
+                    items: { $ref: '#/components/schemas/DocumentSummary' }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "404": { $ref: '#/components/responses/NotEnrolled' }
+
+  /digilocker/v1/fetch:
+    post:
+      tags: [DigiLocker]
+      summary: Retrieve one document
+      description: |
+        Consent is per document, not per session. The returned `contentUrl` is
+        short-lived and single-use — a URL that outlived the request would turn a
+        consented, audited fetch into an open document endpoint.
+      operationId: fetchDocument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [aadhaar, docId, consent]
+              properties:
+                aadhaar: { type: string, example: "999000100009" }
+                docId: { type: string, example: "itd-pan-0001" }
+                consent: { type: string, enum: ["Y"], example: "Y" }
+      responses:
+        "200":
+          description: Document retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txnId: { type: string }
+                  status: { type: string, example: FETCHED }
+                  fetchedAt: { type: string, format: date-time }
+                  document:
+                    allOf:
+                      - $ref: '#/components/schemas/DocumentSummary'
+                      - type: object
+                        properties:
+                          holderName: { type: string }
+                          aadhaarMasked: { type: string }
+                          contentUrl: { type: string, format: uri }
+                          contentExpiresInSeconds: { type: integer, example: 300 }
+        "400": { $ref: '#/components/responses/BadRequest' }
+        "404":
+          description: The document is not available for this resident
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /health:
+    get:
+      tags: [Platform]
+      summary: Liveness
+      description: Outside partner authentication — an operator's probe is not a partner's billable call.
+      operationId: health
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string }
+
+components:
+  schemas:
+    Problem:
+      type: object
+      description: |
+        Every failure uses this shape. `resolution` is written for the person
+        speaking to the applicant, not for a developer reading a stack trace.
+      properties:
+        errorCode: { type: string, example: PTN-400-001 }
+        message: { type: string, example: The Aadhaar number is not valid. }
+        resolution: { type: string, example: "Send a 12-digit Aadhaar number. Check for transposed digits — the check digit did not match." }
+        requestId: { type: string, example: req_8f2a1c9d0b }
+        timestamp: { type: string, format: date-time }
+    KycRecord:
+      type: object
+      properties:
+        aadhaarMasked: { type: string, example: "XXXX XXXX 0009" }
+        name: { type: string, example: Ananya Krishnan }
+        dateOfBirth: { type: string, format: date, example: "1991-04-17" }
+        gender: { type: string, example: F }
+        email: { type: string, example: "a****n@example.in" }
+        mobileMasked: { type: string, example: "XXXXXX4417" }
+        address:
+          type: object
+          properties:
+            careOf: { type: string, example: "D/O Krishnan R" }
+            house: { type: string, example: "14, Brindavan Layout" }
+            street: { type: string, example: "Sarjapur Road" }
+            locality: { type: string, example: Bellandur }
+            district: { type: string, example: "Bengaluru Urban" }
+            state: { type: string, example: Karnataka }
+            pincode: { type: string, example: "560103" }
+            country: { type: string, example: India }
+    DocumentSummary:
+      type: object
+      properties:
+        docId: { type: string, example: itd-pan-0001 }
+        docType: { type: string, example: PAN }
+        issuer: { type: string, example: Income Tax Department }
+        issuedOn: { type: string, format: date }
+        mime: { type: string, example: application/pdf }
+        sizeBytes: { type: integer, example: 96010 }
+  responses:
+    BadRequest:
+      description: The request was rejected. `resolution` says what to change.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthenticated:
+      description: The calling partner could not be identified.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            errorCode: PTN-401-001
+            message: Calling partner could not be identified.
+            resolution: Send the request through the Protean gateway with a valid access token.
+    NotEnrolled:
+      description: No Aadhaar record for this number.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            errorCode: PTN-404-001
+            message: No Aadhaar record was found for this number.
+            resolution: Ask the resident to confirm the number, or route them to an alternative KYC method.
+    UnknownTxn:
+      description: The transaction is not recognised or has expired.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }

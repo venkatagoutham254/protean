@@ -8,6 +8,7 @@
     "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "swagger-ui-dist": "^5.32.14"
   }
 }

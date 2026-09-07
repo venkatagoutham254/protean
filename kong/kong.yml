@@ -77,9 +77,11 @@ plugins:
         - path_pattern: "^/ekyc/v1/demographic"
           method: POST
           metric_name: demographic_matches
-        - path_pattern: "^/pan/v1/verify"
-          method: POST
-          metric_name: pan_verifications
+        # /pan/v1/verify is deliberately NOT mapped. The catalog metric for it
+        # is not in use, and with no default_metric an unmapped path is dropped
+        # rather than sent under a name the catalog would reject. Consequence:
+        # PAN verify calls are proxied normally but never billed. Add a rule
+        # here once the metric is live.
         - path_pattern: "^/pan/v1/link%-status"
           method: GET
           metric_name: pan_link_checks

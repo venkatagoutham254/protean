@@ -51,14 +51,13 @@ exactly what is wrong (unknown metric, clock skew, bad customer).
 
 ## Metric mapping
 
-`kong.yml` maps nine endpoints onto seven metrics:
+`kong.yml` maps eight endpoints onto six metrics:
 
 | Endpoint | Method | Metric |
 |---|---|---|
 | `/ekyc/v1/otp` | POST | `ekyc_otp_sent` |
 | `/ekyc/v1/verify` | POST | `ekyc_verifications` |
 | `/ekyc/v1/demographic` | POST | `demographic_matches` |
-| `/pan/v1/verify` | POST | `pan_verifications` |
 | `/pan/v1/link-status` | GET | `pan_link_checks` |
 | `/esign/v1/initiate` | POST | `esign_requests` |
 | `/esign/v1/complete` | POST | `esign_requests` |
@@ -75,6 +74,10 @@ exactly what is wrong (unknown metric, clock skew, bad customer).
 
 There is deliberately **no** `default_metric`. An unmapped path is dropped rather
 than billed under a catch-all name the Aforo catalog does not recognise.
+
+`POST /pan/v1/verify` is intentionally absent from the table: it is proxied like
+any other route but is **not metered**, so those calls are never billed. Add a
+mapping once its catalog metric is in use.
 
 ## Adding an endpoint
 

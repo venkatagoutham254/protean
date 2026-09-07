@@ -1,0 +1,105 @@
+# Kong declarative config -- Protean identity APIs, metered by Aforo.
+#
+# NO SECRETS IN THIS FILE. Both credentials are read from the environment at
+# boot via Kong's env vault. Set them in kong/.env (gitignored); see README.md.
+#
+# The two credentials are NOT interchangeable:
+#
+#   ICICI_API_KEY    ICICI's key. Kong checks it locally to answer "who is
+#                    calling?", and that consumer becomes the billed customer.
+#   AFORO_INGEST_KEY Aforo's ingest key. Kong sends it to the ingestor to answer
+#                    "may I meter?"
+#
+# Swapping them fails in opposite ways: the first yields events with no customer,
+# the second a 401 on every flush.
+_format_version: "3.0"
+
+services:
+  - name: protean-identity
+    url: http://protean-api:9200
+    routes:
+      # strip_path stays false: the upstream mounts /ekyc/v1 etc. itself, and the
+      # metering plugin reads the request path to pick a metric. Stripping breaks
+      # both at once.
+      - name: ekyc
+        paths: ["/ekyc/v1"]
+        strip_path: false
+      - name: pan
+        paths: ["/pan/v1"]
+        strip_path: false
+      - name: esign
+        paths: ["/esign/v1"]
+        strip_path: false
+      - name: digilocker
+        paths: ["/digilocker/v1"]
+        strip_path: false
+
+consumers:
+  # custom_id is what the plugin bills against -- handler.lua reads
+  # consumer.custom_id first, then username, then id. It must be the Aforo
+  # customerId, not a friendly name, or events arrive unattributable.
+  - username: icici
+    custom_id: "{vault://env/ICICI_CUSTOMER_ID}"
+    keyauth_credentials:
+      - key: "{vault://env/ICICI_API_KEY}"
+
+plugins:
+  - name: key-auth
+    config:
+      key_names: ["X-API-Key", "apikey"]
+      # Do not leak the credential to the upstream.
+      hide_credentials: true
+
+  - name: aforo-metering
+    config:
+      aforo_endpoint: https://api.aforo.ai/v1/ingest/batch
+      api_key: "{vault://env/AFORO_INGEST_KEY}"
+      tenant_id: protean
+
+      # Only "consumer" is accepted. Header and query-param sources were removed
+      # because they let a caller choose who gets billed.
+      customer_id_source: consumer
+
+      # path_pattern is a LUA PATTERN passed to string.find -- not a glob.
+      # Two consequences that bite:
+      #   ^   anchors, so a rule cannot match a longer unrelated path
+      #   %-  escapes the hyphen. Unescaped, "link-status" parses as "lin",
+      #       then "k-" (lazy zero-or-more k), then "status" -- which matches
+      #       "linkstatus" and never "link-status". Silent mis-metering.
+      # Order is the tie-breaker: specific before general.
+      metric_mappings:
+        - path_pattern: "^/ekyc/v1/otp"
+          method: POST
+          metric_name: ekyc_otp_sent
+        - path_pattern: "^/ekyc/v1/verify"
+          method: POST
+          metric_name: ekyc_verifications
+        - path_pattern: "^/ekyc/v1/demographic"
+          method: POST
+          metric_name: demographic_matches
+        - path_pattern: "^/pan/v1/verify"
+          method: POST
+          metric_name: pan_verifications
+        - path_pattern: "^/pan/v1/link%-status"
+          method: GET
+          metric_name: pan_link_checks
+        - path_pattern: "^/esign/v1/initiate"
+          method: POST
+          metric_name: esign_requests
+        - path_pattern: "^/esign/v1/complete"
+          method: POST
+          metric_name: esign_requests
+        - path_pattern: "^/digilocker/v1/documents"
+          method: GET
+          metric_name: documents_fetched
+        - path_pattern: "^/digilocker/v1/fetch"
+          method: POST
+          metric_name: documents_fetched
+
+      # Deliberately absent: default_metric. With no fallback, a path outside the
+      # mappings is dropped rather than billed under a catch-all the catalog does
+      # not know -- which the ingestor would reject anyway, one event at a time.
+
+      flush_interval_ms: 5000
+      flush_count: 50
+      include_metadata: true

@@ -1,0 +1,72 @@
+# Protean identity APIs behind Kong, metered by Aforo.
+#
+#   cp .env.example .env    # fill in the three values
+#   docker compose up -d --build
+#
+# Kong is built from ./plugin, not pulled from Docker Hub. The plugin cannot be
+# installed into a running Kong container: KONG_PLUGINS is an environment
+# variable, so changing it recreates the container, which discards whatever
+# `luarocks make` put there -- and the new container then dies during
+# init_by_lua before you can exec in to fix it. Baking it into the image is the
+# only order that works.
+
+services:
+  protean-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: protean-api
+    environment:
+      PORT: "9200"
+    expose:
+      - "9200"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:9200/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  kong:
+    build:
+      context: ./plugin
+      dockerfile: Dockerfile
+      args:
+        # Match the Kong version you run in production.
+        KONG_VERSION: "3.9"
+    container_name: protean-kong
+    depends_on:
+      protean-api:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+
+      # Lets kong.yml use {vault://env/NAME}. Without it those strings are
+      # stored verbatim and every flush authenticates with the literal text
+      # "{vault://env/AFORO_INGEST_KEY}".
+      KONG_VAULTS: "env"
+
+      # handler.lua buffers events here. Without this dict the plugin loads,
+      # proxies traffic normally, and silently meters nothing.
+      KONG_NGINX_HTTP_LUA_SHARED_DICT: "aforo_buffer 10m"
+
+      # aforo_endpoint is https, and Kong's default verify depth of 1 is too
+      # shallow for a normal leaf -> intermediate -> root chain. OpenSSL reports
+      # the shortfall as "unable to get local issuer certificate", which reads
+      # like a missing CA bundle and is not one -- only the depth matters.
+      KONG_LUA_SSL_VERIFY_DEPTH: "3"
+
+      # Consumed by the vault references in kong.yml.
+      AFORO_INGEST_KEY: ${AFORO_INGEST_KEY:?set AFORO_INGEST_KEY in kong/.env}
+      ICICI_API_KEY: ${ICICI_API_KEY:?set ICICI_API_KEY in kong/.env}
+      ICICI_CUSTOMER_ID: ${ICICI_CUSTOMER_ID:?set ICICI_CUSTOMER_ID in kong/.env}
+    volumes:
+      - ./kong.yml:/kong/kong.yml:ro
+    ports:
+      - "${KONG_PROXY_PORT:-8000}:8000"
+      - "${KONG_ADMIN_PORT:-8001}:8001"

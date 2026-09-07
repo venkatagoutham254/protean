@@ -1,7 +1,13 @@
 # Kong declarative config -- Protean identity APIs, metered by Aforo.
 #
-# NO SECRETS IN THIS FILE. Both credentials are read from the environment at
-# boot via Kong's env vault. Set them in kong/.env (gitignored); see README.md.
+# NO SECRETS IN THIS FILE. This is a TEMPLATE: render-config.sh substitutes the
+# ${...} placeholders from kong/.env and writes kong.yml, which is gitignored.
+#
+# Kong's own {vault://env/...} references were tried first and do not work here:
+# in DB-less declarative mode they are stored verbatim rather than resolved, and
+# consumer.custom_id is not a referenceable field in any mode. The failure is
+# silent -- Kong boots clean and every request 401s because the stored key is
+# the literal reference string.
 #
 # The two credentials are NOT interchangeable:
 #
@@ -39,9 +45,9 @@ consumers:
   # consumer.custom_id first, then username, then id. It must be the Aforo
   # customerId, not a friendly name, or events arrive unattributable.
   - username: icici
-    custom_id: "{vault://env/ICICI_CUSTOMER_ID}"
+    custom_id: "${ICICI_CUSTOMER_ID}"
     keyauth_credentials:
-      - key: "{vault://env/ICICI_API_KEY}"
+      - key: "${ICICI_API_KEY}"
 
 plugins:
   - name: key-auth
@@ -50,10 +56,34 @@ plugins:
       # Do not leak the credential to the upstream.
       hide_credentials: true
 
+  # The upstream trusts X-Customer-Id and friends because Kong is the only way
+  # in -- src/middleware/identity.js says that trust holds "only because Kong
+  # overwrites these headers on every request". remove runs before add inside
+  # this plugin, so a client sending its own X-Customer-Id has it stripped and
+  # replaced with the one bound to its verified credential. Drop the remove list
+  # and any caller can assert any partner id and be billed as them.
+  - name: request-transformer
+    config:
+      remove:
+        headers:
+          - X-Customer-Id
+          - X-Tenant-Id
+          - X-Key-Id
+          - X-Scopes
+          - X-Environment
+      add:
+        headers:
+          # key-auth (priority 1250) runs before request-transformer (801), so
+          # X-Consumer-Custom-Id is already populated from the consumer's
+          # custom_id -- which is ICICI's Aforo customerId.
+          - "X-Customer-Id:$(headers['x-consumer-custom-id'])"
+          - "X-Tenant-Id:protean"
+          - "X-Environment:production"
+
   - name: aforo-metering
     config:
       aforo_endpoint: https://api.aforo.ai/v1/ingest/batch
-      api_key: "{vault://env/AFORO_INGEST_KEY}"
+      api_key: "${AFORO_INGEST_KEY}"
       tenant_id: protean
 
       # Only "consumer" is accepted. Header and query-param sources were removed
@@ -82,8 +112,10 @@ plugins:
         # rather than sent under a name the catalog would reject. Consequence:
         # PAN verify calls are proxied normally but never billed. Add a rule
         # here once the metric is live.
+        # POST, not GET -- src/routes/pan.js:48 defines router.post('/link-status').
+        # A GET rule here matches nothing and the metric never fires.
         - path_pattern: "^/pan/v1/link%-status"
-          method: GET
+          method: POST
           metric_name: pan_link_checks
         - path_pattern: "^/esign/v1/initiate"
           method: POST

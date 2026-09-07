@@ -19,12 +19,20 @@ before Kong ever starts.
 ```sh
 cd kong
 cp .env.example .env      # fill in all three values
+./render-config.sh        # writes kong.yml from kong.yml.template
 docker compose up -d --build
 ```
 
 Three values go in `.env` — see the comments there for what each one is and how
-they fail when swapped. Nothing secret is committed: `kong.yml` refers to them
-as `{vault://env/NAME}`, resolved at boot by `KONG_VAULTS=env`.
+they fail when swapped. Nothing secret is committed: `kong.yml.template` holds
+`${...}` placeholders, and both `.env` and the rendered `kong.yml` are
+gitignored. **Re-run `./render-config.sh` after editing either file.**
+
+Kong's own `{vault://env/...}` references were tried first and do not work here:
+in DB-less declarative mode they are stored verbatim rather than resolved, and
+`consumer.custom_id` is not referenceable in any mode. The failure is silent —
+Kong boots clean, reports no error, and every request 401s because the stored
+credential is the literal string `{vault://env/ICICI_API_KEY}`.
 
 ## Verify
 
@@ -41,13 +49,20 @@ curl -s -X POST localhost:8000/ekyc/v1/otp \
   -H 'Content-Type: application/json' \
   -d '{"aadhaar":"999999990019"}'
 
-# 4. Within ~5s the event flushes. Confirm in the proxy log:
+# 4. Within ~5s the event flushes. The plugin logs this at INFO, and Kong's
+#    default level (notice) is ABOVE info -- so at the default a working plugin
+#    and a dead one look identical. Raise the level to see it:
+KONG_LOG_LEVEL=info docker compose up -d --force-recreate --no-deps kong
 docker compose logs kong | grep aforo-metering
-#   expect: Flushed 1 events to Aforo (status=202)
+#   expect: Flushed N events to Aforo (status=202)
 ```
 
-If step 4 shows `accepted:0, failed:1`, read the message — the ingestor says
-exactly what is wrong (unknown metric, clock skew, bad customer).
+Note what a `status=202` does and does not tell you: it is the HTTP status of
+the batch, not per-event acceptance. The ingestor can return 202 while rejecting
+individual events (unknown metric, clock skew, unattributable customer) in the
+`accepted`/`failed` counts of the response body, which the plugin does not log.
+To confirm events actually landed, check usage in Aforo rather than trusting the
+proxy log alone.
 
 ## Metric mapping
 

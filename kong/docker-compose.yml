@@ -46,6 +46,13 @@ services:
       KONG_PROXY_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
 
+      # The plugin logs a successful flush at INFO ("Flushed N events to Aforo").
+      # Kong's default level is notice, which is above info, so at the default a
+      # working plugin and a completely silent one look identical in the logs.
+      # Raise this to info while verifying metering:
+      #   KONG_LOG_LEVEL=info docker compose up -d --force-recreate kong
+      KONG_LOG_LEVEL: ${KONG_LOG_LEVEL:-notice}
+
       # Lets kong.yml use {vault://env/NAME}. Without it those strings are
       # stored verbatim and every flush authenticates with the literal text
       # "{vault://env/AFORO_INGEST_KEY}".

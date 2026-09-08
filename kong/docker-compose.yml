@@ -75,5 +75,14 @@ services:
     volumes:
       - ./kong.yml:/kong/kong.yml:ro
     ports:
-      - "${KONG_PROXY_PORT:-8000}:8000"
-      - "${KONG_ADMIN_PORT:-8001}:8001"
+      # Bound to loopback, not 0.0.0.0. nginx is the only thing that should
+      # reach the proxy, and the admin API must NEVER be publicly reachable --
+      # it can rewrite routes, consumers and credentials and has no
+      # authentication of its own. Publishing 8001 on a public IP hands anyone
+      # who finds it the ability to mint a consumer and bill someone else.
+      #
+      # On a host that already runs another Kong, override the ports in .env:
+      #   KONG_PROXY_PORT=8010
+      #   KONG_ADMIN_PORT=8011
+      - "${KONG_BIND:-127.0.0.1}:${KONG_PROXY_PORT:-8000}:8000"
+      - "${KONG_BIND:-127.0.0.1}:${KONG_ADMIN_PORT:-8001}:8001"
